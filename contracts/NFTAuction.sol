@@ -1,5 +1,4 @@
-pragma solidity ^0.8.0;
-// SPDX-License-Identifier: MIT
+
 
 interface IERC165 {
     /**
@@ -970,7 +969,14 @@ abstract contract ERC721URIStorage is ERC721 {
 
 
 
-contract NFTAuction is ERC721URIStorage {
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+// import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+// import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+contract NFTAuction is ERC721URIStorage, ReentrancyGuard {
 
     using Math for uint256;
 
@@ -980,98 +986,114 @@ contract NFTAuction is ERC721URIStorage {
         string tokenURI;
         bool exists;
         uint bidIncrement;
+        uint256 startDate;
+        uint256 endDate;
     }
 
-    struct bidding {
+    struct Bidding {
         uint highestBindingBid;
         address payable highestBidder;
     }
-    
-    mapping (uint256 => ArtItem) private _artItems;
 
+    mapping (uint256 => ArtItem) private _artItems;
     uint256 public _tokenIds;
     uint256 public _artItemIds;
     bool public canceled;
 
     mapping (uint256 => mapping (address => uint256)) public fundsByBidder;
-    mapping (uint256 => bidding) public bid;
+    mapping (uint256 => Bidding) public bid;
 
     bool auctionstarted = false;
-    bool firsttime = false;
+    bool firsttime = true;
 
     event LogBid(address indexed Bidder, uint256 bid, address indexed highestBidder, uint256 highestBid, uint256 highestBindingBid);
     event LogWithdrawal(address indexed withdrawalAccount, uint256 amount);
     event LogCanceled();
+    event LogEndAuction(address highestBidder, uint256 highestBid);
 
     constructor() ERC721("AuctionART", "ART") 
     {}
 
     modifier artItemExists(uint256 id) {
-        require (_artItems[id].exists, "Not Found");
+        require(_artItems[id].exists, "Not Found");
         _;
     }
 
     modifier onlyNotOwner(uint256 id) {
-        ArtItem memory artItem = _artItems[id];
-        require (msg.sender != artItem.seller);
+        require(msg.sender != _artItems[id].seller, "Owner cannot bid");
         _;
     }
 
-    modifier onlyNotCanceled {
-        require (canceled != true);
+    modifier onlyNotCanceled() {
+        require(!canceled, "Auction canceled");
         _;
     }
 
     modifier onlyOwner(uint256 id) {
-        ArtItem memory artItem = _artItems[id];
-        require (msg.sender == artItem.seller);
+        require(msg.sender == _artItems[id].seller, "Only owner can call this");
         _;
     }
 
     modifier overMinBid(uint256 id) {
-        ArtItem memory artItem = _artItems[id];
-        require (msg.value >= artItem.minbid);
+        require(msg.value >= _artItems[id].minbid, "Bid below minimum");
         _;
     }
 
-    function addArtItem(uint256 price, string memory tokenURI, uint _bidincrement) public {
-        require(price >= 0, "Price cannot be less than 0");
-
-        _artItemIds ++;
-        _artItems[_artItemIds] = ArtItem(payable(msg.sender), price, tokenURI, true, _bidincrement);
-
+    modifier auctionActive(uint256 id) {
+        require(block.timestamp >= _artItems[id].startDate, "Auction has not started yet");
+        require(block.timestamp <= _artItems[id].endDate, "Auction has already ended");
+        _;
     }
 
-    function getArtItem(uint256 id)
-        public
+    function addArtItem(uint256 price, string memory tokenURI, uint _bidincrement, uint256 startDate, uint256 endDate) public {
+        require(price >= 0, "Price cannot be less than 0");
+        require(startDate < endDate, "Start date must be before end date");
+        require(endDate > block.timestamp, "End date must be in the future");
+
+        _artItemIds++;
+        _artItems[_artItemIds] = ArtItem(payable(msg.sender), price, tokenURI, true, _bidincrement, startDate, endDate);
+        firsttime = true;  // Reset firsttime for the new item
+    }
+
+    function getArtItem(uint256 id) 
+        public 
         view 
-        artItemExists(id)
+        artItemExists(id) 
         returns (
             uint256,
             uint256,
             string memory,
+            uint256,
+            uint256,
             uint256
-        )
+        ) 
     {
         ArtItem storage artItem = _artItems[id];
-        bidding storage bd = bid[id];
-        return (id, artItem.minbid, artItem.tokenURI, bd.highestBindingBid);
+        Bidding storage bd = bid[id];
+        return (id, artItem.minbid, artItem.tokenURI, bd.highestBindingBid, artItem.startDate, artItem.endDate);
     }
 
-    function cancelAuction(uint256 id) public payable
-        onlyOwner(id)
-        onlyNotCanceled()
-        returns (bool success)
+    function extendEndDate(uint256 id, uint256 newEndDate) public onlyOwner(id) {
+        require(newEndDate > _artItems[id].endDate, "New end date must be later than current end date");
+        _artItems[id].endDate = newEndDate;
+    }
+
+    function cancelAuction(uint256 id) 
+        public 
+        payable 
+        onlyOwner(id) 
+        onlyNotCanceled() 
+        returns (bool success) 
     {
         canceled = true;
         if (auctionstarted == true) {
             ArtItem memory artItem = _artItems[id];
-            bidding storage bd = bid[id];
-            _tokenIds ++;
+            Bidding storage bd = bid[id];
+            _tokenIds++;
             _safeMint(msg.sender, _tokenIds);
             _setTokenURI(_tokenIds, artItem.tokenURI);
             
-            require (bd.highestBindingBid != 0);
+            require(bd.highestBindingBid != 0, "No bids placed");
             fundsByBidder[id][bd.highestBidder] -= bd.highestBindingBid;
             payable(msg.sender).transfer(bd.highestBindingBid);
         }
@@ -1079,24 +1101,22 @@ contract NFTAuction is ERC721URIStorage {
         return true;
     }
 
-    function placeBid(uint256 id)
-        public payable
-        onlyNotCanceled
-        onlyNotOwner(id)
+    function placeBid(uint256 id) 
+        public 
+        payable 
+        onlyNotCanceled 
+        onlyNotOwner(id) 
         overMinBid(id)
+        auctionActive(id)
+        nonReentrant 
     {
-        require (msg.value > 0);
-        bidding storage bd = bid[id];
+        require(msg.value > 0, "Bid value must be greater than 0");
+        Bidding storage bd = bid[id];
         auctionstarted = true;
         ArtItem memory artItem = _artItems[id];
 
-        /*
-            bidIncrement = 10;
-            highestBid = 2000;
-            bid.highestBindingBid = 
-         */
         uint newBid = fundsByBidder[id][msg.sender] + msg.value;
-        require (newBid > bd.highestBindingBid);
+        require(newBid > bd.highestBindingBid, "There already is a higher or equal bid");
 
         uint highestBid = fundsByBidder[id][bd.highestBidder];
         fundsByBidder[id][msg.sender] = newBid;
@@ -1107,26 +1127,28 @@ contract NFTAuction is ERC721URIStorage {
             if (msg.sender != bd.highestBidder) {
                 bd.highestBindingBid = newBid.min(highestBid + artItem.bidIncrement);
                 bd.highestBidder = payable(msg.sender);
-                if (firsttime) { // if first time
+                if (firsttime) { 
                     bd.highestBindingBid = artItem.minbid + artItem.bidIncrement;
                     firsttime = false;
                 }
             }
         }
-        highestBid = newBid;
-    }           
+        emit LogBid(msg.sender, newBid, bd.highestBidder, highestBid, bd.highestBindingBid);
+    }
 
-    function witdraw(uint256 id) public payable onlyNotOwner(id){
-        require(canceled == true);
-        require(auctionstarted == true);
-        address payable withdrawalAccount;
-        uint withdrawalAmount;
-        bidding storage bd = bid[id];
+    function withdraw(uint256 id) 
+        public 
+        payable 
+        onlyNotOwner(id) 
+        nonReentrant 
+    {
+        require(canceled == true, "Auction not canceled");
+        require(auctionstarted == true, "Auction not started");
 
-
-        withdrawalAccount = payable(msg.sender);
-        withdrawalAmount = fundsByBidder[id][msg.sender];
+        address payable withdrawalAccount = payable(msg.sender);
+        uint withdrawalAmount = fundsByBidder[id][withdrawalAccount];
         
+        Bidding storage bd = bid[id];
         if (msg.sender == bd.highestBidder) {
             withdrawalAmount -= bd.highestBindingBid;
         }
@@ -1135,9 +1157,25 @@ contract NFTAuction is ERC721URIStorage {
         withdrawalAccount.transfer(withdrawalAmount);
 
         emit LogWithdrawal(withdrawalAccount, withdrawalAmount);
-    }                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
-}
+    }
 
+    function endAuction(uint256 id) public artItemExists(id) {
+        ArtItem storage artItem = _artItems[id];
+        Bidding storage bd = bid[id];
+        require(block.timestamp > artItem.endDate, "Auction not yet ended");
+        require(!canceled, "Auction canceled");
+
+        if (bd.highestBidder != address(0)) {
+            _tokenIds++;
+            _safeMint(bd.highestBidder, _tokenIds);
+            _setTokenURI(_tokenIds, artItem.tokenURI);
+            artItem.seller.transfer(bd.highestBindingBid);
+            fundsByBidder[id][bd.highestBidder] = 0;
+
+            emit LogEndAuction(bd.highestBidder, bd.highestBindingBid);
+        }
+    }
+}
 
 
 

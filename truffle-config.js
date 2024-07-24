@@ -38,7 +38,7 @@ module.exports = {
   // Add the following section for compilers
   compilers: {
     solc: {
-      version: "0.8.0", // Default compiler version
+      version: "0.8.20", // Default compiler version
       compilers: [
         {
           version: "0.8.0", // For contracts using ^0.8.0
